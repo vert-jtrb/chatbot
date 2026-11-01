@@ -1,27 +1,36 @@
-from openai import AsyncOpenAI
+from __future__ import annotations
 
 from app.core.config import settings
-from app.providers.ai.base import ModelCapabilities
-from app.providers.ai.openai_provider import OpenAIProvider
+from app.providers.ai.base import ModelCapabilities, ProviderConfig
+from app.providers.ai.openai_compatible import OpenAICompatibleProvider
 
 
-class DeepSeekProvider(OpenAIProvider):
-    name = "deepseek"
+class DeepSeekProvider(OpenAICompatibleProvider):
+    provider_type = "deepseek"
+    display_name = "DeepSeek"
+    default_base_url = "https://api.deepseek.com/v1"
+    capabilities = ModelCapabilities(
+        streaming=True,
+        tools=True,
+        vision=False,
+        embeddings=False,
+        json_mode=True,
+        max_context_length=131072,
+    )
 
-    def __init__(self) -> None:
-        self.capabilities = ModelCapabilities(
-            streaming=True,
-            tools=True,
-            json_mode=True,
-            max_context_length=128000,
+    def __init__(self, config: ProviderConfig | None = None) -> None:
+        config = config or ProviderConfig(
+            name="deepseek",
+            provider_type=self.provider_type,
+            api_key=settings.deepseek_api_key,
+            default_model=settings.deepseek_default_model,
+            timeout=settings.provider_timeout,
+            max_retries=settings.provider_max_retries,
         )
-        self.client = AsyncOpenAI(
-            api_key=settings.deepseek_api_key or "",
-            base_url="https://api.deepseek.com",
-        )
+        config.base_url = config.base_url or self.default_base_url
+        config.api_key = config.api_key or settings.deepseek_api_key
+        config.default_model = config.default_model or settings.deepseek_default_model
+        super().__init__(config)
 
-    async def get_models(self) -> list[dict]:
-        return [
-            {"id": "deepseek-chat", "name": "DeepSeek Chat"},
-            {"id": "deepseek-reasoner", "name": "DeepSeek Reasoner"},
-        ]
+
+__all__ = ["DeepSeekProvider"]

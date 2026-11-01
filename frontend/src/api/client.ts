@@ -25,6 +25,7 @@ function getAuthToken(): string | null {
   } catch {
     return null;
   }
+  return null;
 }
 
 export function setAuthTokens(tokens: {
@@ -74,6 +75,48 @@ async function refreshAccessToken(): Promise<string | null> {
     clearAuthTokens();
     return null;
   }
+}
+
+async function apiStream(
+  endpoint: string,
+  body: unknown,
+  signal?: AbortSignal
+): Promise<Response> {
+  const headers = new Headers({ "Content-Type": "application/json" });
+  const token = getAuthToken();
+  if (token) {
+    headers.set("Authorization", `Bearer ${token}`);
+  }
+
+  const request = (requestHeaders: Headers) =>
+    fetch(`${API_BASE}${endpoint}`, {
+      method: "POST",
+      headers: requestHeaders,
+      body: JSON.stringify(body),
+      signal,
+    });
+
+  let response = await request(headers);
+  if (response.status === 401 && token) {
+    const newToken = await refreshAccessToken();
+    if (newToken) {
+      headers.set("Authorization", `Bearer ${newToken}`);
+      response = await request(headers);
+    }
+  }
+
+  if (!response.ok) {
+    const errorData = await response.json().catch(() => ({}));
+    throw new ApiError(
+      response.status,
+      errorData.detail || "Request failed",
+      errorData.error_code
+    );
+  }
+  if (!response.body) {
+    throw new ApiError(response.status, "Streaming response body is missing");
+  }
+  return response;
 }
 
 export async function apiFetch<T>(
@@ -171,4 +214,5 @@ export const api = {
     }),
   delete: <T>(endpoint: string, options?: FetchOptions) =>
     apiFetch<T>(endpoint, { ...options, method: "DELETE" }),
+  stream: apiStream,
 };

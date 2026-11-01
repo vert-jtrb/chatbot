@@ -1,7 +1,9 @@
+import { useEffect } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/api/client";
 import { useChatStore } from "@/store/chat";
 import type {
+  Chat,
   Conversation,
   Message,
   PaginatedResponse,
@@ -16,6 +18,7 @@ export function useChat() {
     isStreaming,
     streamingContent,
     setActiveConversation,
+    setConversations,
     appendMessage,
     setStreaming,
     appendStreamContent,
@@ -29,6 +32,24 @@ export function useChat() {
       api.get<PaginatedResponse<Conversation>>("/chats/conversations"),
     refetchOnMount: true,
   });
+
+  useEffect(() => {
+    if (conversationsQuery.data) {
+      setConversations(conversationsQuery.data.items);
+    }
+  }, [conversationsQuery.data, setConversations]);
+
+  const startConversation = async (title: string) => {
+    const chat = await api.post<Chat>("/chats", { title });
+    const conversation = await api.post<Conversation>(
+      "/chats/conversations",
+      { chat_id: chat.id, title }
+    );
+    addConversation(conversation);
+    setActiveConversation(conversation.id);
+    queryClient.invalidateQueries({ queryKey: ["conversations"] });
+    return conversation;
+  };
 
   const createConversation = useMutation({
     mutationFn: (data: { chat_id: string; title: string }) =>
@@ -65,6 +86,7 @@ export function useChat() {
     streamingContent,
     conversationsQuery,
     setActiveConversation,
+    startConversation,
     createConversation: createConversation.mutateAsync,
     sendMessage: sendMessage.mutateAsync,
     clearStreamContent,

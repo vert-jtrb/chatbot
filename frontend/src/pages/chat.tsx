@@ -1,8 +1,16 @@
-import { useCallback } from "react";
-import { useChatStore } from "@/store/chat";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { useQuery } from "@tanstack/react-query";
+import { useNavigate, useParams } from "@tanstack/react-router";
+import { api } from "@/api/client";
 import { ChatWindow } from "@/features/chat/chat-window";
+import { useChat } from "@/hooks/useChat";
+import { useChatStore } from "@/store/chat";
+import type { Message } from "@/types";
 
 export function ChatPage() {
+  const navigate = useNavigate();
+  const { conversationId: routeConversationId } = useParams({ strict: false });
+  const { startConversation } = useChat();
   const {
     activeConversationId,
     messages,
@@ -12,16 +20,63 @@ export function ChatPage() {
     appendStreamContent,
     setStreaming,
     clearStreamContent,
+    setActiveConversation,
+    addMessages,
   } = useChatStore();
+  const [streamError, setStreamError] = useState<string | null>(null);
+  const abortControllerRef = useRef<AbortController | null>(null);
+
+  const messagesQuery = useQuery({
+    queryKey: ["messages", activeConversationId],
+    queryFn: () =>
+      api.get<Message[]>(
+        `/chats/conversations/${activeConversationId}/messages`
+      ),
+    enabled: Boolean(activeConversationId),
+  });
+
+  useEffect(() => {
+    setActiveConversation(routeConversationId || null);
+  }, [routeConversationId, setActiveConversation]);
+
+  useEffect(() => {
+    if (activeConversationId && messagesQuery.data) {
+      addMessages(activeConversationId, messagesQuery.data);
+    }
+  }, [activeConversationId, addMessages, messagesQuery.data]);
+
+  useEffect(
+    () => () => abortControllerRef.current?.abort(),
+    []
+  );
 
   const handleSend = useCallback(
     async (content: string) => {
-      if (!activeConversationId) return;
+      if (isStreaming) return;
+      setStreamError(null);
 
-      // Add user message immediately
-      appendMessage(activeConversationId, {
+      let conversationId = activeConversationId;
+      if (!conversationId) {
+        try {
+          const conversation = await startConversation(content.slice(0, 60));
+          conversationId = conversation.id;
+          navigate({
+            to: "/chat/$conversationId",
+            params: { conversationId },
+          });
+        } catch (error) {
+          setStreamError(
+            error instanceof Error
+              ? error.message
+              : "Unable to start a new conversation."
+          );
+          return;
+        }
+      }
+
+      appendMessage(conversationId, {
         id: `temp-${Date.now()}`,
-        conversation_id: activeConversationId,
+        conversation_id: conversationId,
         role: "user",
         content,
         model_id: null,
@@ -39,23 +94,15 @@ export function ChatPage() {
 
       setStreaming(true);
       clearStreamContent();
-
+      const controller = new AbortController();
+      abortControllerRef.current = controller;
       try {
-        const response = await fetch(
-          `/api/v1/chats/conversations/${activeConversationId}/stream`,
-          {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              Authorization: `Bearer ${JSON.parse(localStorage.getItem("auth") || "{}").access_token}`,
-            },
-            body: JSON.stringify({ content, role: "user" }),
-          }
+        const response = await api.stream(
+          `/chats/conversations/${conversationId}/stream`,
+          { content },
+          controller.signal
         );
-
-        const reader = response.body?.getReader();
-        if (!reader) return;
-
+        const reader = response.body!.getReader();
         const decoder = new TextDecoder();
         let buffer = "";
 
@@ -64,45 +111,72 @@ export function ChatPage() {
           if (done) break;
 
           buffer += decoder.decode(value, { stream: true });
-          const lines = buffer.split("\n");
-          buffer = lines.pop() || "";
+          const frames = buffer.split(/\r?\n\r?\n/);
+          buffer = frames.pop() || "";
 
-          for (const line of lines) {
-            if (line.startsWith("event: token")) {
-              // Next line has data
-            } else if (line.startsWith("data: ")) {
-              try {
-                const data = JSON.parse(line.slice(6));
-                appendStreamContent(data.content || "");
-                if (data.done) {
-                  setStreaming(false);
-                  break;
-                }
-              } catch {
-                // Skip malformed JSON
+          for (const frame of frames) {
+            let eventName = "message";
+            const dataLines: string[] = [];
+            for (const line of frame.split(/\r?\n/)) {
+              if (line.startsWith("event:")) {
+                eventName = line.slice(6).trim();
+              } else if (line.startsWith("data:")) {
+                dataLines.push(line.slice(5).trimStart());
               }
-            } else if (line.startsWith("event: done")) {
-              setStreaming(false);
+            }
+
+            if (eventName === "token" && dataLines.length) {
+              const chunk = JSON.parse(dataLines.join("\n"));
+              appendStreamContent(chunk.content || "");
+            } else if (eventName === "message" && dataLines.length) {
+              appendMessage(conversationId, JSON.parse(dataLines.join("\n")));
+            } else if (eventName === "error" && dataLines.length) {
+              const data = JSON.parse(dataLines.join("\n"));
+              throw new Error(data.detail || "The assistant could not respond.");
             }
           }
         }
       } catch (error) {
-        console.error("Stream error:", error);
+        if (!controller.signal.aborted) {
+          setStreamError(
+            error instanceof Error
+              ? error.message
+              : "The assistant could not respond."
+          );
+        }
+      } finally {
+        abortControllerRef.current = null;
         setStreaming(false);
+        clearStreamContent();
       }
     },
-    [activeConversationId, appendMessage, appendStreamContent, setStreaming, clearStreamContent]
+    [
+      activeConversationId,
+      appendMessage,
+      appendStreamContent,
+      clearStreamContent,
+      isStreaming,
+      navigate,
+      setStreaming,
+      startConversation,
+    ]
   );
 
   const handleStop = useCallback(() => {
-    setStreaming(false);
-  }, [setStreaming]);
+    abortControllerRef.current?.abort();
+  }, []);
 
   return (
     <ChatWindow
-      messages={activeConversationId ? (messages[activeConversationId] || []) : []}
+      messages={activeConversationId ? messages[activeConversationId] || [] : []}
       isStreaming={isStreaming}
       streamingContent={streamingContent}
+      error={
+        streamError ||
+        (messagesQuery.error instanceof Error
+          ? messagesQuery.error.message
+          : null)
+      }
       onSend={handleSend}
       onStop={handleStop}
       activeConversationId={activeConversationId}

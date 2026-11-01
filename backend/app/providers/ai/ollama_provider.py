@@ -1,117 +1,86 @@
-from collections.abc import AsyncGenerator
+from __future__ import annotations
+
 from typing import Any
 
-import httpx
-
 from app.core.config import settings
-from app.providers.ai.base import AIProvider, ChatMessage, ModelCapabilities, StreamChunk
+from app.providers.ai.base import ModelCapabilities, ProviderConfig
+from app.providers.ai.openai_compatible import OpenAICompatibleProvider
 
 
-class OllamaProvider(AIProvider):
-    name = "ollama"
+class OllamaProvider(OpenAICompatibleProvider):
+    """Ollama exposes both a native API and an OpenAI-compatible surface."""
 
-    def __init__(self) -> None:
-        self.capabilities = ModelCapabilities(
-            streaming=True,
-            tools=True,
-            vision=True,
-            json_mode=True,
-            max_context_length=8192,
+    provider_type = "ollama"
+    display_name = "Ollama"
+    capabilities = ModelCapabilities(
+        streaming=True,
+        tools=True,
+        vision=True,
+        embeddings=True,
+        json_mode=True,
+        max_context_length=32768,
+    )
+    requires_api_key = False
+
+    def __init__(self, config: ProviderConfig | None = None) -> None:
+        config = config or ProviderConfig(
+            name="ollama",
+            provider_type=self.provider_type,
+            api_key=None,
+            timeout=settings.provider_timeout,
+            max_retries=settings.provider_max_retries,
+            extra={"native_base_url": settings.ollama_base_url},
         )
-        self.base_url = settings.ollama_base_url
+        native = (config.extra or {}).get("native_base_url") or settings.ollama_base_url
+        self.native_base_url = native.rstrip("/").removesuffix("/v1")
+        base = config.base_url or f"{self.native_base_url}/v1"
+        if not base.rstrip("/").endswith("/v1"):
+            base = f"{base.rstrip('/')}/v1"
+        config.base_url = base
+        config.default_model = config.default_model or settings.ollama_default_model
+        super().__init__(config)
 
-    async def chat(
-        self,
-        messages: list[ChatMessage],
-        model: str | None = None,
-        system_prompt: str | None = None,
-        temperature: float | None = None,
-        top_p: float | None = None,
-        max_tokens: int | None = None,
-        tools: list[dict] | None = None,
-    ) -> ChatMessage:
-        payload = self._build_payload(
-            messages, model, system_prompt, temperature, top_p, max_tokens, tools
+    async def get_models(self) -> list[dict[str, Any]]:
+        response = await self._request("GET", f"{self.native_base_url}/api/tags", retries=0)
+        data = response.json()
+        models: list[dict[str, Any]] = []
+        for item in data.get("models") or []:
+            name = item.get("name") or item.get("model")
+            if not name:
+                continue
+            details = item.get("details") or {}
+            models.append(
+                {
+                    "id": name,
+                    "name": name,
+                    "owned_by": "ollama",
+                    "context_length": details.get("context_length"),
+                    "metadata": item,
+                }
+            )
+        return models
+
+    async def embeddings(
+        self, texts: list[str], model: str | None = None
+    ) -> list[list[float]]:
+        if not texts:
+            return []
+        response = await self._request(
+            "POST",
+            f"{self.native_base_url}/api/embed",
+            json_body={"model": self.resolve_model(model), "input": texts},
         )
+        data = response.json()
+        return [list(map(float, vector)) for vector in data.get("embeddings") or []]
 
-        async with httpx.AsyncClient(base_url=self.base_url) as client:
-            response = await client.post("/api/chat", json=payload)
-            response.raise_for_status()
-            data = response.json()
+    async def health_check(self) -> bool:
+        try:
+            response = await self._request(
+                "GET", f"{self.native_base_url}/api/tags", retries=0
+            )
+            return response.status_code < 500
+        except Exception:
+            return False
 
-        return ChatMessage(
-            role="assistant",
-            content=data.get("message", {}).get("content", ""),
-        )
 
-    async def stream_chat(
-        self,
-        messages: list[ChatMessage],
-        model: str | None = None,
-        system_prompt: str | None = None,
-        temperature: float | None = None,
-        top_p: float | None = None,
-        max_tokens: int | None = None,
-        tools: list[dict] | None = None,
-    ) -> AsyncGenerator[StreamChunk]:
-        payload = self._build_payload(
-            messages, model, system_prompt, temperature, top_p, max_tokens, tools
-        )
-        payload["stream"] = True
-
-        async with httpx.AsyncClient(base_url=self.base_url) as client, \
-                client.stream("POST", "/api/chat", json=payload) as response:
-                response.raise_for_status()
-                async for line in response.aiter_lines():
-                    if not line:
-                        continue
-                    import json
-                    data = json.loads(line)
-                    content = data.get("message", {}).get("content", "")
-                    done = data.get("done", False)
-                    yield StreamChunk(
-                        content=content,
-                        done=done,
-                        finish_reason="stop" if done else None,
-                    )
-
-    async def get_models(self) -> list[dict]:
-        async with httpx.AsyncClient(base_url=self.base_url) as client:
-            response = await client.get("/api/tags")
-            response.raise_for_status()
-            data = response.json()
-        return [
-            {"id": m["name"], "name": m["name"]}
-            for m in data.get("models", [])
-        ]
-
-    def _build_payload(
-        self,
-        messages: list[ChatMessage],
-        model: str | None,
-        system_prompt: str | None,
-        temperature: float | None,
-        top_p: float | None,
-        max_tokens: int | None,
-        tools: list[dict] | None,
-    ) -> dict:
-        payload: dict[str, Any] = {}
-        payload["model"] = model or "llama3.2"
-        ollama_messages = []
-        if system_prompt:
-            ollama_messages.append({"role": "system", "content": system_prompt})
-        for msg in messages:
-            ollama_messages.append({"role": msg.role, "content": msg.content})
-        payload["messages"] = ollama_messages
-        options: dict = {}
-        if temperature is not None:
-            options["temperature"] = temperature
-        if top_p is not None:
-            options["top_p"] = top_p
-        if max_tokens is not None:
-            options["num_predict"] = max_tokens
-        if options:
-            payload["options"] = options
-        if tools:
-            payload["tools"] = tools
-        return payload
+__all__ = ["OllamaProvider"]

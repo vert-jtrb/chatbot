@@ -9,6 +9,7 @@ interface ChatWindowProps {
   messages: Message[];
   isStreaming: boolean;
   streamingContent: string;
+  error?: string | null;
   onSend: (content: string) => void;
   onStop: () => void;
   activeConversationId: string | null;
@@ -18,6 +19,7 @@ export function ChatWindow({
   messages,
   isStreaming,
   streamingContent,
+  error,
   onSend,
   onStop,
   activeConversationId,
@@ -86,6 +88,12 @@ export function ChatWindow({
             />
           )}
 
+          {error && (
+            <p role="alert" className="py-2 text-sm text-destructive">
+              {error}
+            </p>
+          )}
+
           <div ref={bottomRef} />
         </div>
       </ScrollArea>
@@ -94,6 +102,7 @@ export function ChatWindow({
         onSend={onSend}
         onStop={onStop}
         isStreaming={isStreaming}
+        disabled={isStreaming}
       />
     </div>
   );

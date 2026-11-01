@@ -1,9 +1,11 @@
-from collections.abc import Sequence
+from __future__ import annotations
 
-from sqlalchemy import func, select, update
+from collections.abc import Sequence
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload
 
+from app.database.base import utc_now
 from app.models.chat import Chat, Conversation, Message
 from app.repositories.base import BaseRepository
 
@@ -16,15 +18,51 @@ class ChatRepository(BaseRepository[Chat]):
         stmt = (
             select(Chat)
             .options(joinedload(Chat.conversations))
-            .where(Chat.id == chat_id)
+            .where(Chat.id == chat_id, Chat.is_deleted.is_(False))
         )
         result = await self.session.execute(stmt)
         return result.unique().scalar_one_or_none()
+
+    async def get_for_user(self, chat_id: str, user_id: str) -> Chat | None:
+        stmt = select(Chat).where(
+            Chat.id == chat_id,
+            Chat.user_id == user_id,
+            Chat.is_deleted.is_(False),
+        )
+        result = await self.session.execute(stmt)
+        return result.scalar_one_or_none()
+
+    async def list_for_user(
+        self, user_id: str, skip: int = 0, limit: int = 50
+    ) -> tuple[Sequence[Chat], int]:
+        where = (Chat.user_id == user_id, Chat.is_deleted.is_(False))
+        total = await self.session.scalar(
+            select(func.count()).select_from(Chat).where(*where)
+        )
+        result = await self.session.execute(
+            select(Chat)
+            .where(*where)
+            .order_by(Chat.updated_at.desc())
+            .offset(skip)
+            .limit(limit)
+        )
+        return result.scalars().all(), int(total or 0)
 
 
 class ConversationRepository(BaseRepository[Conversation]):
     def __init__(self, session: AsyncSession) -> None:
         super().__init__(session, Conversation)
+
+    async def get_by_user_id(
+        self, conversation_id: str, user_id: str
+    ) -> Conversation | None:
+        stmt = select(Conversation).where(
+            Conversation.id == conversation_id,
+            Conversation.user_id == user_id,
+            Conversation.is_deleted.is_(False),
+        )
+        result = await self.session.execute(stmt)
+        return result.scalar_one_or_none()
 
     async def get_by_user(
         self,
@@ -34,47 +72,39 @@ class ConversationRepository(BaseRepository[Conversation]):
         search: str | None = None,
         status: str | None = None,
     ) -> tuple[Sequence[Conversation], int]:
-        stmt = select(Conversation).where(
-            Conversation.user_id == user_id,
-            not Conversation.is_deleted,
-        )
-        count_stmt = select(func.count()).select_from(Conversation).where(
-            Conversation.user_id == user_id,
-            not Conversation.is_deleted,
-        )
-
+        where = [Conversation.user_id == user_id, Conversation.is_deleted.is_(False)]
         if search:
-            stmt = stmt.where(Conversation.title.ilike(f"%{search}%"))
-            count_stmt = count_stmt.where(Conversation.title.ilike(f"%{search}%"))
-
+            where.append(Conversation.title.ilike(f"%{search}%"))
         if status:
-            stmt = stmt.where(Conversation.status == status)
-            count_stmt = count_stmt.where(Conversation.status == status)
-
-        count_result = await self.session.execute(count_stmt)
-        total = count_result.scalar() or 0
-
-        stmt = stmt.order_by(Conversation.last_message_at.desc().nullslast())
-        stmt = stmt.offset(skip).limit(limit)
-        result = await self.session.execute(stmt)
-        items = result.scalars().all()
-        return items, total
-
-    async def update_message_count(self, conversation_id: str) -> None:
-        from app.models.chat import Message
-
-        subq = (
-            select(func.count())
-            .select_from(Message)
-            .where(Message.conversation_id == conversation_id)
-            .scalar_subquery()
+            where.append(Conversation.status == status)
+        total = await self.session.scalar(
+            select(func.count()).select_from(Conversation).where(*where)
         )
         stmt = (
-            update(Conversation)
-            .where(Conversation.id == conversation_id)
-            .values(message_count=subq)
+            select(Conversation)
+            .where(*where)
+            .order_by(
+                Conversation.is_pinned.desc(),
+                Conversation.last_message_at.desc().nullslast(),
+                Conversation.updated_at.desc(),
+            )
+            .offset(skip)
+            .limit(limit)
         )
-        await self.session.execute(stmt)
+        result = await self.session.execute(stmt)
+        return result.scalars().all(), int(total or 0)
+
+    async def touch(
+        self, conversation_id: str, *, token_count: int, title_hint: str | None = None
+    ) -> None:
+        conversation = await self.get(conversation_id)
+        if conversation is None:
+            return
+        conversation.last_message_at = utc_now()
+        conversation.message_count = conversation.message_count + 2
+        conversation.token_count = conversation.token_count + token_count
+        if title_hint and conversation.title in {"", "New chat", "New conversation"}:
+            conversation.title = title_hint[:80]
         await self.session.flush()
 
 
@@ -83,21 +113,50 @@ class MessageRepository(BaseRepository[Message]):
         super().__init__(session, Message)
 
     async def get_by_conversation(
-        self, conversation_id: str, skip: int = 0, limit: int = 200
+        self,
+        conversation_id: str,
+        skip: int = 0,
+        limit: int = 200,
+        ascending: bool = True,
     ) -> tuple[Sequence[Message], int]:
-        stmt = select(Message).where(
-            Message.conversation_id == conversation_id
-        )
-        count_stmt = (
+        total = await self.session.scalar(
             select(func.count())
             .select_from(Message)
             .where(Message.conversation_id == conversation_id)
         )
-        count_result = await self.session.execute(count_stmt)
-        total = count_result.scalar() or 0
+        order = Message.created_at.asc() if ascending else Message.created_at.desc()
+        result = await self.session.execute(
+            select(Message)
+            .where(Message.conversation_id == conversation_id)
+            .order_by(order)
+            .offset(skip)
+            .limit(limit)
+        )
+        return result.scalars().all(), int(total or 0)
 
-        stmt = stmt.order_by(Message.created_at.asc())
-        stmt = stmt.offset(skip).limit(limit)
+    async def recent_for_context(
+        self, conversation_id: str, limit: int = 30
+    ) -> list[Message]:
+        result = await self.session.execute(
+            select(Message)
+            .where(Message.conversation_id == conversation_id)
+            .order_by(Message.created_at.desc())
+            .limit(limit)
+        )
+        return list(reversed(result.scalars().all()))
+
+    async def get_owned(self, message_id: str, user_id: str) -> Message | None:
+        stmt = (
+            select(Message)
+            .join(Conversation, Message.conversation_id == Conversation.id)
+            .where(
+                Message.id == message_id,
+                Conversation.user_id == user_id,
+                Conversation.is_deleted.is_(False),
+            )
+        )
         result = await self.session.execute(stmt)
-        items = result.scalars().all()
-        return items, total
+        return result.scalar_one_or_none()
+
+
+__all__ = ["ChatRepository", "ConversationRepository", "MessageRepository"]

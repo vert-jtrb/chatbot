@@ -1,4 +1,5 @@
 import json
+import logging
 from collections.abc import AsyncGenerator
 from dataclasses import asdict
 
@@ -22,6 +23,7 @@ from app.schemas.chat import (
 from app.services.chat import ChatService
 
 router = APIRouter(prefix="/chats", tags=["Chats"])
+logger = logging.getLogger(__name__)
 
 
 @router.post("", response_model=ChatResponse, status_code=201)
@@ -86,6 +88,24 @@ async def list_conversations(
     return result.data
 
 
+@router.get(
+    "/conversations/{conversation_id}/messages",
+    response_model=list[MessageResponse],
+)
+async def list_messages(
+    conversation_id: str,
+    current_user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+) -> list[dict]:
+    service = ChatService(session)
+    result = await service.get_messages(current_user.id, conversation_id)
+    if not result.success:
+        raise HTTPException(
+            status_code=result.status_code, detail=result.error
+        )
+    return result.data
+
+
 @router.post(
     "/conversations/{conversation_id}/messages",
     response_model=MessageResponse,
@@ -118,18 +138,45 @@ async def stream_message(
     session: AsyncSession = Depends(get_session),
 ) -> EventSourceResponse:
     service = ChatService(session)
+    access = await service.get_conversation(current_user.id, conversation_id)
+    if not access.success:
+        raise HTTPException(
+            status_code=access.status_code, detail=access.error
+        )
 
     async def event_generator() -> AsyncGenerator[dict]:
-        async for chunk in service.stream_message(
-            user_id=current_user.id,
-            conversation_id=conversation_id,
-            data=request,
-        ):
-            yield {
-                "event": "token",
-                "data": json.dumps(asdict(chunk)),
-            }
+        try:
+            async for chunk in service.stream_message(
+                user_id=current_user.id,
+                conversation_id=conversation_id,
+                data=request,
+            ):
+                yield {
+                    "event": "token",
+                    "data": json.dumps(asdict(chunk)),
+                }
 
-        yield {"event": "done", "data": ""}
+            assistant_message = service.last_assistant_message
+            if assistant_message:
+                yield {
+                    "event": "message",
+                    "data": json.dumps(
+                        MessageResponse.model_validate(
+                            assistant_message
+                        ).model_dump(mode="json")
+                    ),
+                }
+            yield {"event": "done", "data": ""}
+        except Exception:
+            logger.exception(
+                "Chat response stream failed for conversation %s",
+                conversation_id,
+            )
+            yield {
+                "event": "error",
+                "data": json.dumps(
+                    {"detail": "The assistant could not complete the response."}
+                ),
+            }
 
     return EventSourceResponse(event_generator())

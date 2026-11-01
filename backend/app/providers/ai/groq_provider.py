@@ -1,29 +1,36 @@
-from openai import AsyncOpenAI
+from __future__ import annotations
 
 from app.core.config import settings
-from app.providers.ai.base import ModelCapabilities
-from app.providers.ai.openai_provider import OpenAIProvider
+from app.providers.ai.base import ModelCapabilities, ProviderConfig
+from app.providers.ai.openai_compatible import OpenAICompatibleProvider
 
 
-class GroqProvider(OpenAIProvider):
-    name = "groq"
+class GroqProvider(OpenAICompatibleProvider):
+    provider_type = "groq"
+    display_name = "Groq"
+    default_base_url = "https://api.groq.com/openai/v1"
+    capabilities = ModelCapabilities(
+        streaming=True,
+        tools=True,
+        vision=False,
+        embeddings=False,
+        json_mode=True,
+        max_context_length=131072,
+    )
 
-    def __init__(self) -> None:
-        self.capabilities = ModelCapabilities(
-            streaming=True,
-            tools=True,
-            json_mode=True,
-            max_context_length=128000,
+    def __init__(self, config: ProviderConfig | None = None) -> None:
+        config = config or ProviderConfig(
+            name="groq",
+            provider_type=self.provider_type,
+            api_key=settings.groq_api_key,
+            default_model=settings.groq_default_model,
+            timeout=settings.provider_timeout,
+            max_retries=settings.provider_max_retries,
         )
-        self.client = AsyncOpenAI(
-            api_key=settings.groq_api_key or "",
-            base_url="https://api.groq.com/openai/v1",
-        )
+        config.base_url = config.base_url or self.default_base_url
+        config.api_key = config.api_key or settings.groq_api_key
+        config.default_model = config.default_model or settings.groq_default_model
+        super().__init__(config)
 
-    async def get_models(self) -> list[dict]:
-        return [
-            {"id": "llama3-70b-8192", "name": "Llama 3 70B"},
-            {"id": "llama3-8b-8192", "name": "Llama 3 8B"},
-            {"id": "mixtral-8x7b-32768", "name": "Mixtral 8x7B"},
-            {"id": "gemma2-9b-it", "name": "Gemma 2 9B"},
-        ]
+
+__all__ = ["GroqProvider"]
