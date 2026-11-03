@@ -67,6 +67,27 @@ def create_refresh_token(
     return _encode(claims), token_id, now + expires
 
 
+def create_password_reset_token(
+    subject: str, expires_delta: timedelta | None = None
+) -> str:
+    """Create a short-lived single-purpose token for password resets."""
+
+    now = datetime.now(UTC)
+    expires = expires_delta or timedelta(minutes=30)
+    return _encode(
+        {
+            "sub": subject,
+            "iat": now,
+            "nbf": now,
+            "exp": now + expires,
+            "iss": settings.jwt_issuer,
+            "aud": settings.jwt_audience,
+            "jti": str(uuid4()),
+            "type": "password_reset",
+        }
+    )
+
+
 def decode_token(token: str) -> dict[str, Any]:
     try:
         return jwt.decode(  # type: ignore[no-any-return]
@@ -98,6 +119,7 @@ def token_fingerprint(token: str) -> str:
 __all__ = [
     "TokenError",
     "create_access_token",
+    "create_password_reset_token",
     "create_refresh_token",
     "decode_token",
     "token_fingerprint",

@@ -31,12 +31,21 @@ async_session_factory = async_sessionmaker(
 
 
 async def get_session() -> AsyncGenerator[AsyncSession]:
+    """Request-scoped session that commits once the handler succeeds.
+
+    Services call ``flush`` so they can observe generated ids; the dependency
+    owns the transaction boundary.  Any unhandled exception rolls the whole
+    request back, which keeps multi-row writes atomic.
+    """
+
     async with async_session_factory() as session:
         try:
             yield session
         except Exception:
             await session.rollback()
             raise
+        else:
+            await session.commit()
 
 
 async def session_scope() -> AsyncGenerator[AsyncSession]:

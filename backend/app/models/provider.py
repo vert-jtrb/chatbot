@@ -16,7 +16,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from app.database.base import GUID, Entity
+from app.database.base import GUID, Entity, SoftDeletable
 
 
 class ProviderType(StrEnum):
@@ -33,7 +33,7 @@ class ProviderType(StrEnum):
     CUSTOM = "custom"
 
 
-class AIProviderConfig(Entity):
+class AIProviderConfig(SoftDeletable):
     """Runtime provider configuration.
 
     API keys are always stored encrypted (Fernet) and never returned by any API

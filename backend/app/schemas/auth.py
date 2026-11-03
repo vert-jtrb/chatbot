@@ -45,6 +45,17 @@ class AuthResponse(BaseModel):
     tokens: TokenResponse
 
 
+class LoginResponse(TokenResponse):
+    """Flat login payload consumed directly by the SPA."""
+
+    user: UserResponse
+
+
+class OAuthAuthorizeResponse(BaseModel):
+    authorization_url: str
+    state: str
+
+
 class RefreshTokenRequest(BaseModel):
     refresh_token: str
 

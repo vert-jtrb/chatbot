@@ -136,14 +136,10 @@ class PgVectorStore:
         matches: list[VectorMatch],
         metadata_filter: dict[str, Any] | None,
     ) -> list[VectorMatch]:
-        if not metadata_filter:
-            return matches
-        filtered: list[VectorMatch] = []
-        by_id = {match.chunk_id: match for match in matches}
-        rows = (
-            self.session.execute if False else None
-        )  # metadata filtering happens in RAGService for chunk fields
-        return [by_id[match.chunk_id] for match in matches]
+        # Row-level metadata filtering is applied in RAGService where both the
+        # document and chunk metadata are available.  Accepting the argument
+        # here keeps the adapter contract uniform across backends.
+        return matches
 
     async def delete(self, chunk_ids: list[str]) -> None:
         if not chunk_ids:

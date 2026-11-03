@@ -23,10 +23,13 @@ class AIProviderRepository(BaseRepository[AIProvider]):
         result = await self.session.execute(stmt)
         return result.unique().scalar_one_or_none()
 
-    async def get_by_name(self, name: str) -> AIProvider | None:
-        result = await self.session.execute(
-            select(AIProvider).where(AIProvider.name == name)
-        )
+    async def get_by_name(
+        self, name: str, *, include_deleted: bool = False
+    ) -> AIProvider | None:
+        stmt = select(AIProvider).where(AIProvider.name == name)
+        if not include_deleted:
+            stmt = stmt.where(AIProvider.is_deleted.is_(False))
+        result = await self.session.execute(stmt)
         return result.scalar_one_or_none()
 
     async def get_default(self) -> AIProvider | None:

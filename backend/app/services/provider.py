@@ -242,6 +242,64 @@ class ProviderService:
             is_active=True,
         )
 
+    async def bootstrap_from_environment(self) -> dict[str, int]:
+        """Materialise environment-configured providers as database rows.
+
+        This keeps ``HF_TOKEN``/``OPENAI_API_KEY`` usable without a manual admin
+        step while still allowing the database to override any value later.
+        Soft-deleted rows are revived rather than recreated so unique names are
+        never violated.
+        """
+
+        created = 0
+        revived = 0
+        models = 0
+        for provider_type in PROVIDER_CLASSES:
+            if not has_credentials(provider_type):
+                continue
+            defaults = default_config(provider_type)
+            provider = await self.providers.get_by_name(
+                provider_type, include_deleted=True
+            )
+            if provider is None:
+                provider = await self.providers.create(
+                    name=provider_type,
+                    display_name=defaults.name.replace("_", " ").title(),
+                    provider_type=provider_type,
+                    base_url=defaults.base_url,
+                    default_model=defaults.default_model,
+                    default_inference_provider=defaults.default_inference_provider,
+                    timeout=defaults.timeout,
+                    max_retries=defaults.max_retries,
+                    config={},
+                    is_active=True,
+                )
+                created += 1
+            elif provider.is_deleted:
+                provider.is_deleted = False
+                provider.deleted_at = None
+                provider.is_active = True
+                revived += 1
+            if provider.default_model:
+                existing_model = await self.models.get_by_model_id(
+                    provider.default_model, provider.id
+                )
+                if existing_model is None:
+                    await self.models.create(
+                        provider_id=provider.id,
+                        name=provider.default_model,
+                        model_id=provider.default_model,
+                        is_default=True,
+                    )
+                    models += 1
+        if await self.providers.get_default() is None:
+            active = await self.providers.get_active()
+            if active:
+                active[0].is_default = True
+        await self.session.flush()
+        return {"created": created, "revived": revived, "models": models}
+
+
     # ------------------------------------------------------------------
     # Model discovery / health
     # ------------------------------------------------------------------

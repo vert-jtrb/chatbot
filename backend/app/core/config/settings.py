@@ -54,6 +54,10 @@ class Settings(BaseSettings):
     secret_key: str = "development-secret-key-change-in-production"
     environment: Environment = Environment.DEVELOPMENT
     api_v1_prefix: str = "/api/v1"
+    auto_create_tables: bool = True
+    bootstrap_demo_data: bool = False
+    admin_email: str | None = None
+    admin_password: str | None = None
 
     # ------------------------------------------------------------------
     # Database
@@ -199,6 +203,7 @@ class Settings(BaseSettings):
     rag_similarity_threshold: float = 0.25
     rag_hybrid_alpha: float = 0.65
     rag_max_context_chars: int = 12000
+    chat_context_messages: int = 30
 
     # ------------------------------------------------------------------
     # Rate limiting
@@ -244,6 +249,10 @@ class Settings(BaseSettings):
     @property
     def is_production(self) -> bool:
         return self.environment == Environment.PRODUCTION
+
+    @property
+    def max_upload_size_bytes(self) -> int:
+        return self.max_upload_size_mb * 1024 * 1024
 
     @property
     def is_development(self) -> bool:

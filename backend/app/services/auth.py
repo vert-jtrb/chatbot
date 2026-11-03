@@ -320,6 +320,7 @@ class AuthService:
     async def ensure_default_roles(self) -> None:
         for role_name, permissions in DEFAULT_PERMISSIONS.items():
             role = await self._role_by_name(role_name)
+            created_role = role is None
             if role is None:
                 role = Role(
                     name=role_name,
@@ -328,10 +329,14 @@ class AuthService:
                 )
                 self.session.add(role)
                 await self.session.flush()
-            existing = {
-                (permission.resource, permission.action)
-                for permission in role.permissions
-            }
+            existing = (
+                set()
+                if created_role
+                else {
+                    (permission.resource, permission.action)
+                    for permission in role.permissions
+                }
+            )
             for permission_name in permissions:
                 resource, action = permission_name.split(":", 1)
                 if (resource, action) in existing:
